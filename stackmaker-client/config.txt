@@ -1,0 +1,4 @@
+main-font /usr/share/fonts/fira-code/FiraCode-Regular.ttf
+mono-font /usr/share/fonts/fira-code/FiraCode-Regular.ttf
+saves-dir saves
+assets-dir assets
