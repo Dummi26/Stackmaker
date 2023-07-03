@@ -44,6 +44,9 @@ pub enum Block {
     /// Only lets a signal pass if it is open, that is, the last side-signal received was `0`.
     /// In combination with the Storage Block, this can be used to implement all kinds of conditions.
     Gate(bool, u8),
+    /// Outputs two identical signals upon receiving one.
+    /// This block is triggered exclusively by side-signals.
+    Splitter(u8),
 
     // < World >
     /// Upon receiving a `0` side-signal, takes a block from one stack and puts it on another, following the provided direction. If it receives any other signal, moves a block back.
@@ -232,6 +235,10 @@ impl SaveLoad for Block {
                 let as_one = if *open { *dir | 0b1 } else { *dir };
                 as_one.save(buf);
             }
+            Self::Splitter(dir) => {
+                b'G'.save(buf);
+                dir.save(buf);
+            }
             Self::Move(dir) => {
                 b'm'.save(buf);
                 dir.save(buf);
@@ -261,6 +268,7 @@ impl SaveLoad for Block {
                     Self::Gate(false, as_one)
                 }
             }
+            b'G' => Self::Splitter(SaveLoad::load(src)?),
             b'm' => Self::Move(SaveLoad::load(src)?),
             b'M' => Self::Swap(SaveLoad::load(src)?),
             _ => return None,
@@ -481,6 +489,7 @@ impl Block {
             Self::Storage(_, _, _) => "storage/default",
             Self::Gate(true, _) => "gate/open",
             Self::Gate(false, _) => "gate/closed",
+            Self::Splitter(_) => "splitter",
             Self::Move(..) => "move",
             Self::Swap(..) => "swap",
         }

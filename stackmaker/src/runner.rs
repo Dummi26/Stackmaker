@@ -74,6 +74,30 @@ impl Runner {
                             }
                         }
                     }
+                    Block::Splitter(direction) => {
+                        if is_side(*direction, dir_layer) {
+                            if let Some((a_dir, a_pos_chunk, a_pos_inner)) =
+                                pos_moved(*direction, pos_chunk, pos_inner)
+                            {
+                                self.world.signals_queue[0].push((
+                                    signal,
+                                    (a_dir & 0b11100000) | (dir_layer & 0b11111),
+                                    a_pos_chunk,
+                                    a_pos_inner,
+                                ));
+                            }
+                            if let Some((a_dir, a_pos_chunk, a_pos_inner)) =
+                                pos_moved(dir_rev(*direction), pos_chunk, pos_inner)
+                            {
+                                self.world.signals_queue[0].push((
+                                    signal,
+                                    (a_dir & 0b11100000) | (dir_layer & 0b11111),
+                                    a_pos_chunk,
+                                    a_pos_inner,
+                                ));
+                            }
+                        }
+                    }
                     Block::Move(direction) => {
                         if is_side(*direction, dir_layer) {
                             let layer = dir_layer & 0b11111;

@@ -1,19 +1,17 @@
 use std::{
-    any::Any,
-    collections::HashMap,
-    fs,
-    io::{BufReader, Read},
-    path::{Path, PathBuf},
+    env::current_dir,
+    path::PathBuf,
     rc::Rc,
     sync::{Arc, Mutex},
     thread::JoinHandle,
     time::Instant,
 };
 
-use image::{imageops, RgbaImage};
+use image::RgbaImage;
+use loading::ThreadedLoading;
 use speedy2d::{
     color::Color,
-    dimen::{UVec2, Vec2},
+    dimen::{IVec2, UVec2, Vec2},
     font::{Font, FormattedTextBlock, TextLayout, TextOptions},
     image::{ImageDataType, ImageHandle, ImageSmoothingMode},
     shape::Rectangle,
@@ -28,9 +26,11 @@ use stackmaker::{
     world::{Block, World},
 };
 
+mod loading;
+
 fn main() {
     let window = speedy2d::Window::new_with_user_events(
-        "Stackmaker - Starting",
+        "Stackmaker",
         WindowCreationOptions::new_fullscreen_borderless(),
     )
     .unwrap();
@@ -94,6 +94,13 @@ struct Window {
 struct WindowImages {
     main_menu_background_image: LoadableImage,
     main_menu_singleplayer_new_world_image: LoadableImage,
+    world_menu_arrow_selected: LoadableImage,
+    world_menu_arrow_source: LoadableImage,
+    world_menu_arrow_target: LoadableImage,
+    world_menu_button_pause: LoadableImage,
+    world_menu_button_paused: LoadableImage,
+    world_menu_button_tick: LoadableImage,
+    world_menu_button_signalzero: LoadableImage,
     world_block_color: LoadableImage,
     world_block_char: LoadableImage,
     world_block_delay: [LoadableImage; 6],
@@ -109,16 +116,24 @@ struct WindowImages {
     world_block_storage_default: [LoadableImage; 6],
     world_block_gate_open: [LoadableImage; 6],
     world_block_gate_closed: [LoadableImage; 6],
+    world_block_splitter: [LoadableImage; 6],
     world_block_move: [LoadableImage; 6],
     world_block_swap: [LoadableImage; 6],
 }
 
-enum Event {
+pub enum Event {
     LoadFontMain(Vec<u8>),
     LoadFontMono(Vec<u8>),
     AddWorld(PathBuf, String),
     SetMainMenuBackgroundImage(RgbaImage),
     SetMainMenuSingleplayerNewWorldImage(RgbaImage),
+    SetWorldMenuArrowSelected(RgbaImage),
+    SetWorldMenuArrowSource(RgbaImage),
+    SetWorldMenuArrowTarget(RgbaImage),
+    SetWorldMenuButtonPause(RgbaImage),
+    SetWorldMenuButtonPaused(RgbaImage),
+    SetWorldMenuButtonTick(RgbaImage),
+    SetWorldMenuButtonSignalzero(RgbaImage),
     SetWorldBlockColor(RgbaImage),
     SetWorldBlockChar(RgbaImage),
     SetWorldBlockDelay([Option<RgbaImage>; 6]),
@@ -134,6 +149,7 @@ enum Event {
     SetWorldBlockStorageDefault([Option<RgbaImage>; 6]),
     SetWorldBlockGateOpen([Option<RgbaImage>; 6]),
     SetWorldBlockGateClosed([Option<RgbaImage>; 6]),
+    SetWorldBlockSplitter([Option<RgbaImage>; 6]),
     SetWorldBlockMove([Option<RgbaImage>; 6]),
     SetWorldBlockSwap([Option<RgbaImage>; 6]),
 }
@@ -218,6 +234,31 @@ impl WindowHandler<Event> for Window {
                             graphics,
                         );
                     }
+                    Event::SetWorldMenuArrowSelected(img) => {
+                        Self::load_img(&mut self.images.world_menu_arrow_selected, img, graphics);
+                    }
+                    Event::SetWorldMenuArrowSource(img) => {
+                        Self::load_img(&mut self.images.world_menu_arrow_source, img, graphics);
+                    }
+                    Event::SetWorldMenuArrowTarget(img) => {
+                        Self::load_img(&mut self.images.world_menu_arrow_target, img, graphics);
+                    }
+                    Event::SetWorldMenuButtonPause(img) => {
+                        Self::load_img(&mut self.images.world_menu_button_pause, img, graphics);
+                    }
+                    Event::SetWorldMenuButtonPaused(img) => {
+                        Self::load_img(&mut self.images.world_menu_button_paused, img, graphics);
+                    }
+                    Event::SetWorldMenuButtonTick(img) => {
+                        Self::load_img(&mut self.images.world_menu_button_tick, img, graphics);
+                    }
+                    Event::SetWorldMenuButtonSignalzero(img) => {
+                        Self::load_img(
+                            &mut self.images.world_menu_button_signalzero,
+                            img,
+                            graphics,
+                        );
+                    }
                     Event::SetWorldBlockColor(img) => {
                         Self::load_img(&mut self.images.world_block_color, img, graphics);
                     }
@@ -266,6 +307,9 @@ impl WindowHandler<Event> for Window {
                     }
                     Event::SetWorldBlockGateClosed(img) => {
                         Self::load_imgs(&mut self.images.world_block_gate_closed, img, graphics);
+                    }
+                    Event::SetWorldBlockSplitter(img) => {
+                        Self::load_imgs(&mut self.images.world_block_splitter, img, graphics);
                     }
                     Event::SetWorldBlockMove(img) => {
                         Self::load_imgs(&mut self.images.world_block_move, img, graphics);
@@ -447,6 +491,9 @@ impl WindowHandler<Event> for Window {
                 }
             }
             WindowState::Singleplayer(state, runner) => {
+                if state.run {
+                    runner.tick();
+                }
                 graphics.clear_screen(Color::BLACK);
                 // draw the blocks
                 state.pixels_per_block = 2.0f32.powf(state.zoom);
@@ -493,9 +540,15 @@ impl WindowHandler<Event> for Window {
                 'draw_menu: {
                     if let Some((pos, menu)) = &mut state.open_menu {
                         match menu {
-                            WSInGameMenu::BlockStackChanger { changing, block } => {
+                            WSInGameMenu::BlockStackChanger {
+                                changing,
+                                block,
+                                scroll,
+                                current,
+                                target,
+                            } => {
                                 let (left, right) = if let Some((closing, since_when)) = changing {
-                                    let prog = since_when.elapsed().as_secs_f32();
+                                    let prog = since_when.elapsed().as_secs_f32() * 3.0;
                                     if prog >= 0.3 {
                                         if *closing {
                                             state.open_menu = None;
@@ -513,18 +566,167 @@ impl WindowHandler<Event> for Window {
                                     (0.0, 0.3)
                                 };
                                 let area = Rectangle::new(
-                                    Vec2::new(self.size.x as f32 * left, self.size.y as f32 * 0.05),
-                                    Vec2::new(self.size.x as f32 * right, self.size.y as f32 * 0.9),
+                                    Vec2::new(self.size.y as f32 * left, self.size.y as f32 * 0.05),
+                                    Vec2::new(
+                                        self.size.y as f32 * right,
+                                        self.size.y as f32 * 0.95,
+                                    ),
                                 );
-                                graphics.draw_rectangle(area, Color::DARK_GRAY);
+                                graphics.draw_rectangle(
+                                    area.clone(),
+                                    Color::from_rgba(0.2, 0.2, 0.2, 0.8),
+                                );
+                                graphics.set_clip(Some(Rectangle::new(
+                                    IVec2::new(
+                                        area.top_left().x.ceil() as _,
+                                        area.top_left().y.ceil() as _,
+                                    ),
+                                    IVec2::new(
+                                        area.bottom_right().x.floor() as _,
+                                        area.bottom_right().y.floor() as _,
+                                    ),
+                                )));
+                                // get blocks info
                                 let (chunk, inchunk) =
                                     runner.world.layers[state.layer].get_where(block.0, block.1);
                                 let chunk = runner.world.layers[state.layer].get_mut(&chunk);
-                                let block = &mut chunk[inchunk as usize];
-                                eprintln!("Blocks:");
-                                for block in block.iter().rev() {
-                                    eprintln!("- {}", block.type_name());
+                                let blocks = &mut chunk[inchunk as usize];
+                                dbg!(&blocks);
+                                // draw blocks
+                                if scroll.is_sign_negative() {
+                                    *scroll = 0.0;
                                 }
+                                let pixels_per_block = area.height() / 9.0;
+                                let mut height =
+                                    area.top_left().y - pixels_per_block * (*scroll % 1.0);
+                                let block_list_left = area.top_left().x;
+                                let block_list_right = block_list_left + pixels_per_block;
+                                for block in blocks.iter().rev().skip(scroll.floor() as _).take(10)
+                                {
+                                    let nheight = height + pixels_per_block;
+                                    self.draw_block(
+                                        graphics,
+                                        Rectangle::new(
+                                            Vec2::new(block_list_left, height),
+                                            Vec2::new(block_list_right, nheight),
+                                        ),
+                                        block,
+                                    );
+                                    height = nheight;
+                                }
+                                // draw arrows
+                                // arrow 1: selected/source
+                                current.1 = 0.6 * current.1 + 0.4 * current.0 as f32;
+                                let arrow_y =
+                                    area.top_left().y + pixels_per_block * (current.1 - *scroll);
+                                let arrow_area = Rectangle::new(
+                                    Vec2::new(block_list_right, arrow_y),
+                                    Vec2::new(
+                                        block_list_right + pixels_per_block,
+                                        arrow_y + pixels_per_block,
+                                    ),
+                                );
+                                if area.top_left().y <= arrow_area.bottom_right().y
+                                    && area.bottom_right().y >= arrow_area.top_left().y
+                                {
+                                    if target.is_none() {
+                                        &mut self.images.world_menu_arrow_selected
+                                    } else {
+                                        &mut self.images.world_menu_arrow_source
+                                    }
+                                    .draw_image_aspect_ratio_tinted(
+                                        graphics,
+                                        helper,
+                                        arrow_area,
+                                        Color::WHITE,
+                                        false,
+                                    );
+                                }
+                                // arrow 2: target
+                                graphics.set_clip(None);
+                                if let Some((target_block, is_move, target_arr_height)) = target {
+                                    *target_arr_height = 0.6 * *target_arr_height
+                                        + 0.4
+                                            * if *is_move {
+                                                *target_block as f32 - 0.5
+                                            } else {
+                                                *target_block as f32
+                                            };
+                                    let arrow_y = area.top_left().y
+                                        + pixels_per_block * (*target_arr_height - *scroll);
+                                    let arrow_area = Rectangle::new(
+                                        Vec2::new(block_list_right, arrow_y),
+                                        Vec2::new(
+                                            block_list_right + pixels_per_block,
+                                            arrow_y + pixels_per_block,
+                                        ),
+                                    );
+                                    if area.top_left().y <= arrow_area.bottom_right().y
+                                        && area.bottom_right().y >= arrow_area.top_left().y
+                                    {
+                                        self.images
+                                            .world_menu_arrow_target
+                                            .draw_image_aspect_ratio_tinted(
+                                                graphics,
+                                                helper,
+                                                arrow_area,
+                                                Color::WHITE,
+                                                false,
+                                            );
+                                    }
+                                }
+                                // buttons
+                                let button_area = |nr: f32| {
+                                    Rectangle::new(
+                                        Vec2::new(
+                                            area.bottom_right().x - pixels_per_block,
+                                            area.top_left().y + pixels_per_block * nr,
+                                        ),
+                                        Vec2::new(
+                                            area.bottom_right().x,
+                                            area.top_left().y + pixels_per_block * (nr + 1.0),
+                                        ),
+                                    )
+                                };
+                                // button 1: pause/unpause
+                                let ba = button_area(0.0);
+                                let mi = ba.contains(self.mouse_pos);
+                                if state.run {
+                                    &mut self.images.world_menu_button_pause
+                                } else {
+                                    &mut self.images.world_menu_button_paused
+                                }
+                                .draw_image_aspect_ratio_tinted(
+                                    graphics,
+                                    helper,
+                                    ba,
+                                    if mi { Color::WHITE } else { Color::LIGHT_GRAY },
+                                    false,
+                                );
+                                // button 2: tick
+                                let ba = button_area(1.0);
+                                let mi = ba.contains(self.mouse_pos);
+                                self.images
+                                    .world_menu_button_tick
+                                    .draw_image_aspect_ratio_tinted(
+                                        graphics,
+                                        helper,
+                                        ba,
+                                        if mi { Color::WHITE } else { Color::LIGHT_GRAY },
+                                        false,
+                                    );
+                                // button 3: send signal `0`
+                                let ba = button_area(2.0);
+                                let mi = ba.contains(self.mouse_pos);
+                                self.images
+                                    .world_menu_button_signalzero
+                                    .draw_image_aspect_ratio_tinted(
+                                        graphics,
+                                        helper,
+                                        ba,
+                                        if mi { Color::WHITE } else { Color::LIGHT_GRAY },
+                                        false,
+                                    );
                             }
                         }
                     }
@@ -541,6 +743,31 @@ impl WindowHandler<Event> for Window {
             MouseButton::Middle => self.mouse_down_m = true,
             MouseButton::Right => self.mouse_down_r = true,
             MouseButton::Other(..) => {}
+        }
+        match &mut self.state {
+            WindowState::Nothing | WindowState::MainMenu(..) | WindowState::LoadingWorld(..) => {}
+            WindowState::Singleplayer(state, _) => match &mut state.open_menu {
+                None => {}
+                Some((
+                    _,
+                    WSInGameMenu::BlockStackChanger {
+                        changing,
+                        block,
+                        scroll,
+                        current,
+                        target,
+                    },
+                )) => {
+                    if matches!(button, MouseButton::Left)
+                        && self.mouse_pos.y >= self.size.y as f32 * 0.05
+                        && self.mouse_pos.y <= self.size.y as f32 * 0.95
+                        && self.mouse_pos.x >= 0.0
+                        && self.mouse_pos.x <= self.size.y as f32 * 0.2
+                    {
+                        *target = Some((current.0, false, current.1));
+                    }
+                }
+            },
         }
     }
     fn on_mouse_button_up(&mut self, helper: &mut WindowHelper<Event>, button: MouseButton) {
@@ -581,7 +808,9 @@ impl WindowHandler<Event> for Window {
                                     runner::DIR_UP_L,
                                     runner::DIR_DOWN_L,
                                 ];
-                                chunk[0].push(Block::Char(b'A' as _));
+                                for ch in (b'A'..=b'Z').rev() {
+                                    chunk[0].push(Block::Char(ch as _));
+                                }
                                 for (i, dir) in dirs.iter().enumerate() {
                                     chunk[16 * 0 + 4 + i].push(Block::Delay(0, *dir));
                                 }
@@ -638,6 +867,23 @@ impl WindowHandler<Event> for Window {
                                     ));
                                 }
                             }
+                            // BOTTOM 2 RIGHT
+                            {
+                                let (chunk, _) = world.layers[0].get_where(16, 0);
+                                let chunk = world.layers[0].get_mut(&chunk);
+                                chunk[1].push(Block::Color(0xFFFFFFFF));
+                                chunk[16 + 1].push(Block::Splitter(runner::DIR_UP));
+                                chunk[32 + 1].push(Block::Delay(0, runner::DIR_DOWN));
+                                chunk[48 + 1].push(Block::Splitter(runner::DIR_RIGHT));
+                                chunk[16 + 2].push(Block::Storage(0xFF000000, 4, runner::DIR_LEFT));
+                                chunk[32 + 2].push(Block::Storage(16, 0, runner::DIR_UP));
+                                chunk[48 + 2].push(Block::Splitter(runner::DIR_UP));
+                                chunk[64 + 2].push(Block::Splitter(runner::DIR_RIGHT));
+                                chunk[16 + 3].push(Block::Splitter(runner::DIR_LEFT));
+                                chunk[32 + 3].push(Block::Storage(4, 0, runner::DIR_UP));
+                                chunk[48 + 3].push(Block::Delay(0, runner::DIR_UP));
+                                chunk[64 + 3].push(Block::Splitter(runner::DIR_UP));
+                            }
                             eprintln!("Setting new WindowState.");
                             self.state =
                                 WindowState::Singleplayer(WSInGame::default(), Runner::new(world));
@@ -647,7 +893,67 @@ impl WindowHandler<Event> for Window {
                     }
                 }
                 WindowState::LoadingWorld(..) => {}
-                WindowState::Singleplayer(..) => {}
+                WindowState::Singleplayer(state, runner) => match &mut state.open_menu {
+                    None => {}
+                    Some((
+                        _,
+                        WSInGameMenu::BlockStackChanger {
+                            changing,
+                            block,
+                            scroll,
+                            current,
+                            target,
+                        },
+                    )) => {
+                        if let Some((which, is_move, _)) = target {
+                            let (chunk, inchunk) =
+                                runner.world.layers[state.layer].get_where(block.0, block.1);
+                            let blocks = &mut runner.world.layers[state.layer].get_mut(&chunk)
+                                [inchunk as usize];
+                            if *is_move {
+                                if current.0 < blocks.len() && *which <= blocks.len() {
+                                    let block = blocks.remove(blocks.len() - 1 - current.0);
+                                    let which = if *which > current.0 {
+                                        blocks.len() + 1 - *which
+                                    } else {
+                                        blocks.len() - *which
+                                    };
+                                    blocks.insert(which, block);
+                                }
+                            } else {
+                                if current.0 < blocks.len() && *which < blocks.len() {
+                                    let len = blocks.len();
+                                    blocks.swap(len - 1 - current.0, len - 1 - *which);
+                                }
+                            }
+                            *target = None;
+                        } else if self.mouse_pos.y >= self.size.y as f32 * 0.05
+                            && self.mouse_pos.y <= self.size.y as f32 * 0.95
+                            && self.mouse_pos.x >= self.size.y as f32 * 0.2
+                            && self.mouse_pos.x <= self.size.y as f32 * 0.3
+                        {
+                            // 0..9
+                            let which_button =
+                                ((self.mouse_pos.y / self.size.y as f32) - 0.05) * 10.0;
+                            match which_button as usize {
+                                0 => state.run = !state.run,
+                                1 => runner.tick(),
+                                2 => {
+                                    // send zero-signal from above
+                                    let (chunk, inchunk) = runner.world.layers[state.layer]
+                                        .get_where(block.0, block.1);
+                                    runner.world.signals_queue[0].push((
+                                        0,
+                                        stackmaker::runner::DIR_DOWN_L | state.layer as u8,
+                                        chunk,
+                                        inchunk,
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                },
             },
             MouseButton::Right => match &mut state {
                 WindowState::Nothing => {}
@@ -664,7 +970,16 @@ impl WindowHandler<Event> for Window {
                         state.position.y + mouse_centered.y / state.pixels_per_block,
                     );
                     match &mut state.open_menu {
-                        Some((_, WSInGameMenu::BlockStackChanger { changing, block: _ })) => {
+                        Some((
+                            _,
+                            WSInGameMenu::BlockStackChanger {
+                                changing,
+                                block: _,
+                                scroll: _,
+                                current: _,
+                                target: _,
+                            },
+                        )) => {
                             if !changing.as_ref().is_some_and(|v| v.0) {
                                 *changing = Some((true, Instant::now()))
                             }
@@ -675,6 +990,9 @@ impl WindowHandler<Event> for Window {
                                 WSInGameMenu::BlockStackChanger {
                                     changing: Some((false, Instant::now())),
                                     block: (block_pos.x.round() as _, block_pos.y.round() as _),
+                                    scroll: 0.0,
+                                    current: (0, -0.0),
+                                    target: None,
                                 },
                             ))
                         }
@@ -691,18 +1009,43 @@ impl WindowHandler<Event> for Window {
         helper: &mut WindowHelper<Event>,
         distance: MouseScrollDistance,
     ) {
+        let dist = match distance {
+            MouseScrollDistance::Lines { y, .. } => y as f32 * 1.0,
+            MouseScrollDistance::Pixels { y, .. } => y as f32 * 0.1,
+            MouseScrollDistance::Pages { y, .. } => y as f32 * 10.0,
+        };
         let mut state = self.state.take();
         match &mut state {
             WindowState::Nothing => {}
             WindowState::MainMenu(..) => {}
             WindowState::LoadingWorld(..) => {}
-            WindowState::Singleplayer(state, _) => {
-                state.zoom += match distance {
-                    MouseScrollDistance::Lines { y, .. } => y as f32 * 0.25,
-                    MouseScrollDistance::Pixels { y, .. } => y as f32 * 0.05,
-                    MouseScrollDistance::Pages { y, .. } => y as f32,
+            WindowState::Singleplayer(state, _) => match &mut state.open_menu {
+                Some((
+                    _,
+                    WSInGameMenu::BlockStackChanger {
+                        changing,
+                        block,
+                        scroll,
+                        current,
+                        target,
+                    },
+                )) => {
+                    let rel_mouse = Vec2::new(
+                        self.mouse_pos.x / self.size.x as f32,
+                        self.mouse_pos.y / self.size.y as f32,
+                    );
+                    if rel_mouse.y >= 0.05
+                        && rel_mouse.y <= 0.95
+                        && self.mouse_pos.x >= 0.0
+                        && self.mouse_pos.x <= self.size.y as f32 * 0.3
+                    {
+                        *scroll -= dist * 0.25;
+                    } else {
+                        state.zoom += dist * 0.25;
+                    }
                 }
-            }
+                None => state.zoom += dist,
+            },
         }
         self.state.setnew(state);
         helper.request_redraw();
@@ -731,7 +1074,45 @@ impl WindowHandler<Event> for Window {
     ) {
         match &mut self.state {
             WindowState::Nothing | WindowState::MainMenu(..) | WindowState::LoadingWorld(..) => {}
-            WindowState::Singleplayer(state, _) => {
+            WindowState::Singleplayer(state, _) => 'here: {
+                match &mut state.open_menu {
+                    Some((
+                        _,
+                        WSInGameMenu::BlockStackChanger {
+                            changing,
+                            block,
+                            scroll,
+                            current,
+                            target,
+                        },
+                    )) => {
+                        if self.mouse_pos.y >= self.size.y as f32 * 0.05
+                            && self.mouse_pos.y <= self.size.y as f32 * 0.95
+                            && self.mouse_pos.x >= 0.0
+                            && self.mouse_pos.x <= self.size.y as f32 * 0.3
+                        {
+                            if self.mouse_pos.x <= self.size.y as f32 * 0.2 {
+                                // 0.0..=9.0
+                                let height_in_menu_blocks =
+                                    ((self.mouse_pos.y / self.size.y as f32) - 0.05) * 10.0
+                                        + *scroll;
+                                if (height_in_menu_blocks % 1.0 - 0.5).abs() < 0.3 {
+                                    if let Some((target, is_move, _)) = target {
+                                        *target = height_in_menu_blocks as usize;
+                                        *is_move = false;
+                                    } else {
+                                        current.0 = height_in_menu_blocks as usize;
+                                    }
+                                } else if let Some((target, is_move, _)) = target {
+                                    *target = height_in_menu_blocks.round() as usize;
+                                    *is_move = true;
+                                }
+                            }
+                            break 'here;
+                        }
+                    }
+                    None => {}
+                };
                 if self.mouse_down_l {
                     state.position -= (position - self.mouse_pos) / state.pixels_per_block;
                 }
@@ -742,15 +1123,11 @@ impl WindowHandler<Event> for Window {
     }
 }
 
-struct Config {
+pub struct Config {
     main_font: String,
     mono_font: String,
     saves_dir: String,
     assets_dir: String,
-}
-struct ThreadedLoading {
-    config: Arc<Config>,
-    thread: JoinHandle<Result<UserEventSender<Event>, LoadError>>,
 }
 
 struct WSMainMenu {
@@ -763,6 +1140,7 @@ struct WSMainMenu {
     worlds_texts: Vec<Option<Rc<FormattedTextBlock>>>,
 }
 struct WSInGame {
+    run: bool,
     layer: usize,
     position: Vec2,
     zoom: f32,
@@ -773,6 +1151,7 @@ struct WSInGame {
 impl Default for WSInGame {
     fn default() -> Self {
         Self {
+            run: false,
             layer: 0,
             position: Vec2::ZERO,
             zoom: 5.0,
@@ -786,516 +1165,13 @@ enum WSInGameMenu {
         /// false => opening, true => closing
         changing: Option<(bool, Instant)>,
         block: (i64, i64),
+        scroll: f32,
+        /// if target.is_none(), this is which block we are editing.
+        /// if target.is_some(), this is the origin of the move/swap operation.
+        current: (usize, f32),
+        /// if Some((_, false)), swap, if Some((_, true)), move
+        target: Option<(usize, bool, f32)>,
     },
-}
-
-impl ThreadedLoading {
-    pub fn new(event_sender: UserEventSender<Event>) -> Result<Self, ConfigLoadError> {
-        let mut saves_dir = Err(ConfigLoadError::NoSavesDir);
-        let mut assets_dir = Err(ConfigLoadError::NoAssetsDir);
-        let mut main_font = Err(ConfigLoadError::NoMainFont);
-        let mut mono_font = Err(ConfigLoadError::NoMonoFont);
-        for (i, line) in match fs::read_to_string("config.txt") {
-            Ok(v) => v,
-            Err(e) => return Err(ConfigLoadError::NoConfig(e)),
-        }
-        .lines()
-        .enumerate()
-        {
-            if line.starts_with('#') {
-                continue;
-            }
-            if let Some((key, val)) = line.split_once(' ') {
-                match key {
-                    "saves-dir" => saves_dir = Ok(val.to_owned()),
-                    "assets-dir" => assets_dir = Ok(val.to_owned()),
-                    "main-font" => main_font = Ok(val.to_owned()),
-                    "mono-font" => mono_font = Ok(val.to_owned()),
-                    _ => eprintln!(
-                        "Ignoring line {} in config file because key '{key}' is unknown.",
-                        i + 1
-                    ),
-                }
-            } else {
-                eprintln!(
-                    "Ignoring line {} in config file because no ' ' space character was found.",
-                    i + 1
-                );
-            }
-        }
-        let config = Arc::new(Config {
-            main_font: main_font?,
-            mono_font: mono_font?,
-            saves_dir: saves_dir?,
-            assets_dir: assets_dir?,
-        });
-        Ok(Self {
-            config: Arc::clone(&config),
-            thread: std::thread::spawn(move || {
-                // load fonts
-                fn load_font(path: &str) -> Result<Vec<u8>, std::io::Error> {
-                    let mut buf = Vec::new();
-                    fs::File::open(path)?.read_to_end(&mut buf)?;
-                    Ok(buf)
-                }
-                match load_font(&config.main_font) {
-                    Err(e) => return Err(LoadError::MainFont(e)),
-                    Ok(v) => event_sender.send_event(Event::LoadFontMain(v)).unwrap(),
-                }
-                match load_font(&config.mono_font) {
-                    Err(e) => return Err(LoadError::MonoFont(e)),
-                    Ok(v) => event_sender.send_event(Event::LoadFontMono(v)).unwrap(),
-                }
-                fn open_image_file(p: &PathBuf) -> Option<RgbaImage> {
-                    match fs::File::open(p) {
-                        Ok(file) => {
-                            match image::load(BufReader::new(file), image::ImageFormat::Png) {
-                                Ok(image) => Some(image.into_rgba8()),
-                                Err(e) => {
-                                    eprintln!("Error loading image {p:?}: {e}");
-                                    None
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Error opening file {p:?}: {e}");
-                            None
-                        }
-                    }
-                }
-                fn load_first_image_to_rgba(
-                    name: &str,
-                    assets_path: &PathBuf,
-                    assets_table: &HashMap<String, Vec<u32>>,
-                ) -> Option<RgbaImage> {
-                    let o = ThreadedLoading::get_first_valid(
-                        name,
-                        &assets_path,
-                        &assets_table,
-                        |_, p| open_image_file(&p),
-                    );
-                    if o.is_none() {
-                        eprintln!("No asset named '{name}' found in {assets_path:?}.");
-                    }
-                    o
-                }
-                /// inserts up/down/right/left between `name` and `ext`.
-                /// it then finds the highest priority directory with at least one of these images.
-                /// from there, it uses autorotate to create four images from however many were found.
-                /// returns `None` if
-                /// - no directory contained any image
-                /// - the chosen directory's images couldn't be loaded, but exist on disk
-                fn load_four_images_rgba(
-                    name: &str,
-                    ext: &str,
-                    assets_path: &PathBuf,
-                    assets_table: &HashMap<String, Vec<u32>>,
-                ) -> Option<[RgbaImage; 4]> {
-                    let mut found_where = vec![];
-                    for dir in ["up", "down", "right", "left"] {
-                        let name = format!("{name}{dir}{ext}");
-                        found_where.push(ThreadedLoading::get_first_valid(
-                            &name,
-                            assets_path,
-                            assets_table,
-                            |id, path| Some((id, path)),
-                        ));
-                    }
-                    if let Some(max) = found_where
-                        .iter()
-                        .filter_map(|v| v.as_ref())
-                        .map(|v| v.0)
-                        .max()
-                    {
-                        let mut found: Vec<_> = found_where
-                            .into_iter()
-                            .map(|v| {
-                                if v.as_ref()?.0 == max {
-                                    let path = v?.1;
-                                    open_image_file(&path)
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-                        let f4 = found.pop()?;
-                        let f3 = found.pop()?;
-                        let f2 = found.pop()?;
-                        let f1 = found.pop()?;
-                        autorotate_rgba_images(f1, f2, f3, f4)
-                    } else {
-                        eprintln!("No asset named '{name}{{up/down/right/left}}.png' could be found anywhere in {assets_path:?}. (need at least one of four)");
-                        None
-                    }
-                }
-                /// given at least one of four images, this method will return four images by rotating the images it was given.
-                /// if and only if all four images are `None`, this method also returns `None`.
-                fn autorotate_rgba_images(
-                    up: Option<RgbaImage>,
-                    down: Option<RgbaImage>,
-                    right: Option<RgbaImage>,
-                    left: Option<RgbaImage>,
-                ) -> Option<[RgbaImage; 4]> {
-                    let up = if let Some(up) = up {
-                        up
-                    } else if let Some(down) = &down {
-                        imageops::rotate180(down)
-                    } else if let Some(left) = &left {
-                        imageops::rotate90(left)
-                    } else if let Some(right) = &right {
-                        imageops::rotate270(right)
-                    } else {
-                        eprintln!("Cannot autorotate images: There are no images");
-                        return None;
-                    };
-                    let down = if let Some(down) = down {
-                        down
-                    } else {
-                        imageops::rotate180(&up)
-                    };
-                    let right = if let Some(right) = right {
-                        right
-                    } else if let Some(left) = &left {
-                        imageops::rotate180(left)
-                    } else {
-                        imageops::rotate90(&up)
-                    };
-                    let left = if let Some(left) = left {
-                        left
-                    } else {
-                        imageops::rotate180(&right)
-                    };
-                    Some([up, down, right, left])
-                }
-                // load menu assets (assets/menu/*/*)
-                let assets_path_menu = Path::new(&config.assets_dir).join("menu");
-                let assets_table_menu = match Self::assets_priority_table(&assets_path_menu) {
-                    Ok(v) => v,
-                    Err(_) => return Err(LoadError::MissingAsset("menu".to_owned())),
-                };
-                if let Some(bg) = load_first_image_to_rgba(
-                    "background.png",
-                    &assets_path_menu,
-                    &assets_table_menu,
-                ) {
-                    event_sender
-                        .send_event(Event::SetMainMenuBackgroundImage(bg))
-                        .unwrap();
-                }
-                if let Some(btn) = load_first_image_to_rgba(
-                    "new_singleplayer_world_button.png",
-                    &assets_path_menu,
-                    &assets_table_menu,
-                ) {
-                    event_sender
-                        .send_event(Event::SetMainMenuSingleplayerNewWorldImage(btn))
-                        .unwrap();
-                }
-                // load worlds
-                for dir in match fs::read_dir(&config.saves_dir) {
-                    Ok(v) => v,
-                    Err(e) => return Err(LoadError::CouldNotReadSavesDirectory(e)),
-                } {
-                    if let Ok(dir) = dir {
-                        if dir.metadata().is_ok_and(|meta| meta.is_dir()) {
-                            let path = dir.path();
-                            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                            event_sender
-                                .send_event(Event::AddWorld(path, name))
-                                .unwrap();
-                            // match World::load_from_dir(&path) {
-                            //     Err(e) => eprintln!("Couldn't load world from {dir:?}: {e:?}"),
-                            //     Ok(None) => {
-                            //         eprintln!("Couldn't load world from {dir:?} - byte parse error")
-                            //     }
-                            //     Ok(Some(loaded_world)) => {
-                            //         event_sender
-                            //             .send_event(Event::AddWorld(
-                            //                 path.file_name()
-                            //                     .unwrap()
-                            //                     .to_string_lossy()
-                            //                     .into_owned(),
-                            //                 loaded_world,
-                            //             ))
-                            //             .unwrap();
-                            //     }
-                            // }
-                        }
-                    }
-                }
-                // load world assets (assets/world/*/*)
-                let assets_path_world = Path::new(&config.assets_dir).join("world");
-                let assets_table_world = match Self::assets_priority_table(&assets_path_world) {
-                    Ok(v) => v,
-                    Err(_) => return Err(LoadError::MissingAsset("world".to_owned())),
-                };
-                /// actual file names are "{name}{to/away/up/down/right/left}.png".
-                /// value is up, down, right, left, to, away
-                fn load_six_images_and_send<F: FnOnce([Option<RgbaImage>; 6])>(
-                    name: &str,
-                    f: F,
-                    assets_path: &PathBuf,
-                    assets_table: &HashMap<String, Vec<u32>>,
-                ) {
-                    let to = load_first_image_to_rgba(
-                        &format!("{name}to.png"),
-                        assets_path,
-                        assets_table,
-                    );
-                    let away = load_first_image_to_rgba(
-                        &format!("{name}away.png"),
-                        assets_path,
-                        assets_table,
-                    );
-                    if let Some(imgs) =
-                        load_four_images_rgba(name, ".png", &assets_path, &assets_table)
-                    {
-                        let [f1, f2, f3, f4] = imgs;
-                        f([Some(f1), Some(f2), Some(f3), Some(f4), to, away]);
-                    } else if to.is_some() || away.is_some() {
-                        f([None, None, None, None, to, away])
-                    }
-                }
-                if let Some(img) = load_first_image_to_rgba(
-                    "block_color.png",
-                    &assets_path_world,
-                    &assets_table_world,
-                ) {
-                    event_sender
-                        .send_event(Event::SetWorldBlockColor(img))
-                        .unwrap();
-                }
-                if let Some(img) = load_first_image_to_rgba(
-                    "block_char.png",
-                    &assets_path_world,
-                    &assets_table_world,
-                ) {
-                    event_sender
-                        .send_event(Event::SetWorldBlockChar(img))
-                        .unwrap();
-                }
-                load_six_images_and_send(
-                    "block_delay_",
-                    |v| {
-                        event_sender
-                            .send_event(Event::SetWorldBlockDelay(v))
-                            .unwrap()
-                    },
-                    &assets_path_world,
-                    &assets_table_world,
-                );
-                load_six_images_and_send(
-                    "block_storage_sto_",
-                    |v| {
-                        event_sender
-                            .send_event(Event::SetWorldBlockStorageSto(v))
-                            .unwrap()
-                    },
-                    &assets_path_world,
-                    &assets_table_world,
-                );
-                load_six_images_and_send(
-                    "block_storage_or_",
-                    |v| {
-                        event_sender
-                            .send_event(Event::SetWorldBlockStorageOr(v))
-                            .unwrap()
-                    },
-                    &assets_path_world,
-                    &assets_table_world,
-                );
-                load_six_images_and_send(
-                    "block_storage_and_",
-                    |v| {
-                        event_sender
-                            .send_event(Event::SetWorldBlockStorageAnd(v))
-                            .unwrap()
-                    },
-                    &assets_path_world,
-                    &assets_table_world,
-                );
-                load_six_images_and_send(
-                    "block_storage_xor_",
-                    |v| {
-                        event_sender
-                            .send_event(Event::SetWorldBlockStorageXor(v))
-                            .unwrap()
-                    },
-                    &assets_path_world,
-                    &assets_table_world,
-                );
-                load_six_images_and_send(
-                    "block_storage_add_",
-                    |v| {
-                        event_sender
-                            .send_event(Event::SetWorldBlockStorageAdd(v))
-                            .unwrap()
-                    },
-                    &assets_path_world,
-                    &assets_table_world,
-                );
-                load_six_images_and_send(
-                    "block_storage_sub_",
-                    |v| {
-                        event_sender
-                            .send_event(Event::SetWorldBlockStorageSub(v))
-                            .unwrap()
-                    },
-                    &assets_path_world,
-                    &assets_table_world,
-                );
-                load_six_images_and_send(
-                    "block_storage_mul_",
-                    |v| {
-                        event_sender
-                            .send_event(Event::SetWorldBlockStorageMul(v))
-                            .unwrap()
-                    },
-                    &assets_path_world,
-                    &assets_table_world,
-                );
-                load_six_images_and_send(
-                    "block_storage_div_",
-                    |v| {
-                        event_sender
-                            .send_event(Event::SetWorldBlockStorageDiv(v))
-                            .unwrap()
-                    },
-                    &assets_path_world,
-                    &assets_table_world,
-                );
-                load_six_images_and_send(
-                    "block_storage_mod_",
-                    |v| {
-                        event_sender
-                            .send_event(Event::SetWorldBlockStorageMod(v))
-                            .unwrap()
-                    },
-                    &assets_path_world,
-                    &assets_table_world,
-                );
-                load_six_images_and_send(
-                    "block_storage_default_",
-                    |v| {
-                        event_sender
-                            .send_event(Event::SetWorldBlockStorageDefault(v))
-                            .unwrap()
-                    },
-                    &assets_path_world,
-                    &assets_table_world,
-                );
-                load_six_images_and_send(
-                    "block_gate_open_",
-                    |v| {
-                        event_sender
-                            .send_event(Event::SetWorldBlockGateOpen(v))
-                            .unwrap()
-                    },
-                    &assets_path_world,
-                    &assets_table_world,
-                );
-                load_six_images_and_send(
-                    "block_gate_closed_",
-                    |v| {
-                        event_sender
-                            .send_event(Event::SetWorldBlockGateClosed(v))
-                            .unwrap()
-                    },
-                    &assets_path_world,
-                    &assets_table_world,
-                );
-                load_six_images_and_send(
-                    "block_move_",
-                    |v| {
-                        event_sender
-                            .send_event(Event::SetWorldBlockMove(v))
-                            .unwrap()
-                    },
-                    &assets_path_world,
-                    &assets_table_world,
-                );
-                load_six_images_and_send(
-                    "block_swap_",
-                    |v| {
-                        event_sender
-                            .send_event(Event::SetWorldBlockSwap(v))
-                            .unwrap()
-                    },
-                    &assets_path_world,
-                    &assets_table_world,
-                );
-                Ok(event_sender)
-            }),
-        })
-    }
-    fn get_first_valid<P: AsRef<Path>, F: Fn(u32, PathBuf) -> Option<R>, R>(
-        file_name: &str,
-        assets_dir: P,
-        table: &HashMap<String, Vec<u32>>,
-        func: F,
-    ) -> Option<R> {
-        if let Some(dirs) = table.get(file_name) {
-            for dir in dirs.iter().rev() {
-                let path = assets_dir.as_ref().join(format!("{dir}/{file_name}"));
-                if let Some(v) = func(*dir, path) {
-                    return Some(v);
-                }
-            }
-            None
-        } else {
-            None
-        }
-    }
-    fn assets_priority_table<P: AsRef<Path>>(
-        dir: P,
-    ) -> Result<HashMap<String, Vec<u32>>, std::io::Error> {
-        let mut out: HashMap<String, Vec<u32>> = HashMap::new();
-        for entry in fs::read_dir(dir)? {
-            if let Ok(priority_dir) = entry {
-                if priority_dir.metadata().is_ok_and(|meta| meta.is_dir()) {
-                    if let Ok(entries) = fs::read_dir(priority_dir.path()) {
-                        if let Ok(priority_name) = priority_dir.file_name().into_string() {
-                            if let Ok(priority_name) = priority_name.parse() {
-                                for entry in entries {
-                                    if let Ok(entry) = entry {
-                                        if let Ok(file_name) = entry.file_name().into_string() {
-                                            if let Some(list) = out.get_mut(&file_name) {
-                                                list.push(priority_name);
-                                            } else {
-                                                out.insert(file_name, vec![priority_name]);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        for (_, sources) in out.iter_mut() {
-            sources.sort_unstable();
-        }
-        Ok(out)
-    }
-}
-
-#[derive(Debug)]
-enum ConfigLoadError {
-    NoConfig(std::io::Error),
-    NoSavesDir,
-    NoAssetsDir,
-    NoMainFont,
-    NoMonoFont,
-}
-
-#[derive(Debug)]
-enum LoadError {
-    MainFont(std::io::Error),
-    MonoFont(std::io::Error),
-    CouldNotReadSavesDirectory(std::io::Error),
-    /// String is path relative to assets dir
-    MissingAsset(String),
 }
 
 impl Window {
@@ -1367,6 +1243,13 @@ impl Window {
                     graphics.draw_rectangle_image(area.clone(), handle);
                 }
             }
+            Block::Splitter(dir) => {
+                if let Some(handle) =
+                    Self::index_by_dir(*dir, &self.images.world_block_splitter).handle()
+                {
+                    graphics.draw_rectangle_image(area.clone(), handle);
+                }
+            }
             Block::Move(dir) => {
                 if let Some(handle) =
                     Self::index_by_dir(*dir, &self.images.world_block_move).handle()
@@ -1409,7 +1292,7 @@ impl Window {
     fn load_img(dest: &mut LoadableImage, img: RgbaImage, graphics: &mut Graphics2D) {
         if let Ok(handle) = graphics.create_image_from_raw_pixels(
             ImageDataType::RGBA,
-            ImageSmoothingMode::Linear,
+            ImageSmoothingMode::NearestNeighbor,
             UVec2::new(img.width(), img.height()),
             &img,
         ) {
