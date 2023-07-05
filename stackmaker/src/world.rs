@@ -15,18 +15,23 @@ pub struct Layer {
     pub chunks: HashMap<u64, [Vec<Block>; 256]>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Block {
+    // < Basic >
+    /// Passes a received signal on after the given amount of game ticks.
+    /// Side-signals set the amount of ticks to wait.
+    Delay(u32, u8),
+    /// Outputs two identical signals upon receiving one.
+    /// This block is triggered exclusively by side-signals.
+    Splitter(u8),
+
     // < Output >
     /// A single-color block; format is argb. If it receives any signal, its internal value will be set to that of the signal.
     Color(u32),
     /// A character-display block. If it receives any signal, its internal value will be set to that of the signal.
     Char(u32),
 
-    // < Logic >
-    /// Passes a received signal on after the given amount of game ticks.
-    /// Side-signals set the amount of ticks to wait.
-    Delay(u32, u8),
+    // < Advanced >
     /// Stores a signal value. If it receives a signal, the current value is output and the mode is set according to the signal.
     /// If it receives a signal on its side, the stored value is modified according to the set mode:
     /// - 0 (sto): storage. signals from the side will overwrite the stored value.
@@ -44,9 +49,6 @@ pub enum Block {
     /// Only lets a signal pass if it is open, that is, the last side-signal received was `0`.
     /// In combination with the Storage Block, this can be used to implement all kinds of conditions.
     Gate(bool, u8),
-    /// Outputs two identical signals upon receiving one.
-    /// This block is triggered exclusively by side-signals.
-    Splitter(u8),
 
     // < World >
     /// Upon receiving a `0` side-signal, takes a block from one stack and puts it on another, following the provided direction. If it receives any other signal, moves a block back.

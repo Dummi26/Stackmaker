@@ -413,6 +413,12 @@ impl ThreadedLoading {
                         .send_event(Event::SetWorldMenuButtonSignalzero(img))
                         .unwrap();
                 }
+                load_six_images_and_send(
+                    "signal_",
+                    |v| event_sender.send_event(Event::SetWorldSignal(v)).unwrap(),
+                    &assets_path_world,
+                    &assets_table_world,
+                );
                 if let Some(img) = load_first_image_to_rgba(
                     "block_color.png",
                     &assets_path_world,

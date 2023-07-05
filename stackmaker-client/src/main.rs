@@ -101,6 +101,7 @@ struct WindowImages {
     world_menu_button_paused: LoadableImage,
     world_menu_button_tick: LoadableImage,
     world_menu_button_signalzero: LoadableImage,
+    world_signal: [LoadableImage; 6],
     world_block_color: LoadableImage,
     world_block_char: LoadableImage,
     world_block_delay: [LoadableImage; 6],
@@ -134,6 +135,7 @@ pub enum Event {
     SetWorldMenuButtonPaused(RgbaImage),
     SetWorldMenuButtonTick(RgbaImage),
     SetWorldMenuButtonSignalzero(RgbaImage),
+    SetWorldSignal([Option<RgbaImage>; 6]),
     SetWorldBlockColor(RgbaImage),
     SetWorldBlockChar(RgbaImage),
     SetWorldBlockDelay([Option<RgbaImage>; 6]),
@@ -258,6 +260,9 @@ impl WindowHandler<Event> for Window {
                             img,
                             graphics,
                         );
+                    }
+                    Event::SetWorldSignal(img) => {
+                        Self::load_imgs(&mut self.images.world_signal, img, graphics);
                     }
                     Event::SetWorldBlockColor(img) => {
                         Self::load_img(&mut self.images.world_block_color, img, graphics);
@@ -498,10 +503,8 @@ impl WindowHandler<Event> for Window {
                 // draw the blocks
                 state.pixels_per_block = 2.0f32.powf(state.zoom);
                 let pixels_per_block = state.pixels_per_block;
-                let top_left_x =
-                    state.position.x + 0.5 - self.size.x as f32 / pixels_per_block / 2.0;
-                let top_left_y =
-                    state.position.y + 0.5 - self.size.y as f32 / pixels_per_block / 2.0;
+                let top_left_x = state.position.x - self.size.x as f32 / pixels_per_block / 2.0;
+                let top_left_y = state.position.y - self.size.y as f32 / pixels_per_block / 2.0;
                 let px_x_start = (top_left_x.floor() - top_left_x) * pixels_per_block;
                 let mut px_x = px_x_start;
                 let mut px_y = (top_left_y.floor() - top_left_y) * pixels_per_block;
@@ -536,14 +539,41 @@ impl WindowHandler<Event> for Window {
                     px_x += pixels_per_block;
                     block_x += 1;
                 }
+                // overlay the signal indicator
+                for (_, dir_layer, chunk, pos) in &runner.world.signals_queue[0] {
+                    let chunk_y = i64::from_ne_bytes((*chunk >> 32).to_ne_bytes());
+                    let chunk_x = i64::from_ne_bytes((*chunk & 0xFFFFFFFF).to_ne_bytes());
+                    let x = chunk_x * 16 + (*pos as i64) % 16;
+                    let y = chunk_y * 16 + (*pos as i64) / 16;
+                    let x =
+                        (x as f32 - state.position.x) * pixels_per_block + self.size.x as f32 / 2.0;
+                    let y =
+                        (y as f32 - state.position.y) * pixels_per_block + self.size.y as f32 / 2.0;
+                    let signal_area = Rectangle::new(
+                        Vec2::new(x - pixels_per_block, y - pixels_per_block),
+                        Vec2::new(x + 2.0 * pixels_per_block, y + 2.0 * pixels_per_block),
+                    );
+                    if signal_area.bottom_right().x >= 0.0
+                        && signal_area.bottom_right().y >= 0.0
+                        && signal_area.top_left().x <= self.size.x as f32
+                        && signal_area.top_left().y <= self.size.y as f32
+                    {
+                        if let Some(handle) =
+                            Self::index_by_dir(*dir_layer & 0b11100000, &self.images.world_signal)
+                                .handle()
+                        {
+                            graphics.draw_rectangle_image(signal_area, handle);
+                        }
+                    }
+                }
                 // draw the menu, if there is one
                 'draw_menu: {
-                    if let Some((pos, menu)) = &mut state.open_menu {
+                    if let Some((_pos, menu)) = &mut state.open_menu {
                         match menu {
                             WSInGameMenu::BlockStackChanger {
                                 changing,
                                 block,
-                                scroll,
+                                scroll_l,
                                 current,
                                 target,
                             } => {
@@ -565,95 +595,66 @@ impl WindowHandler<Event> for Window {
                                 } else {
                                     (0.0, 0.3)
                                 };
-                                let area = Rectangle::new(
-                                    Vec2::new(self.size.y as f32 * left, self.size.y as f32 * 0.05),
-                                    Vec2::new(
-                                        self.size.y as f32 * right,
-                                        self.size.y as f32 * 0.95,
-                                    ),
-                                );
-                                graphics.draw_rectangle(
-                                    area.clone(),
-                                    Color::from_rgba(0.2, 0.2, 0.2, 0.8),
-                                );
-                                graphics.set_clip(Some(Rectangle::new(
-                                    IVec2::new(
-                                        area.top_left().x.ceil() as _,
-                                        area.top_left().y.ceil() as _,
-                                    ),
-                                    IVec2::new(
-                                        area.bottom_right().x.floor() as _,
-                                        area.bottom_right().y.floor() as _,
-                                    ),
-                                )));
-                                // get blocks info
-                                let (chunk, inchunk) =
-                                    runner.world.layers[state.layer].get_where(block.0, block.1);
-                                let chunk = runner.world.layers[state.layer].get_mut(&chunk);
-                                let blocks = &mut chunk[inchunk as usize];
-                                dbg!(&blocks);
-                                // draw blocks
-                                if scroll.is_sign_negative() {
-                                    *scroll = 0.0;
-                                }
-                                let pixels_per_block = area.height() / 9.0;
-                                let mut height =
-                                    area.top_left().y - pixels_per_block * (*scroll % 1.0);
-                                let block_list_left = area.top_left().x;
-                                let block_list_right = block_list_left + pixels_per_block;
-                                for block in blocks.iter().rev().skip(scroll.floor() as _).take(10)
+                                // left
                                 {
-                                    let nheight = height + pixels_per_block;
-                                    self.draw_block(
-                                        graphics,
-                                        Rectangle::new(
-                                            Vec2::new(block_list_left, height),
-                                            Vec2::new(block_list_right, nheight),
+                                    let area = Rectangle::new(
+                                        Vec2::new(
+                                            self.size.y as f32 * left,
+                                            self.size.y as f32 * 0.05,
                                         ),
-                                        block,
+                                        Vec2::new(
+                                            self.size.y as f32 * right,
+                                            self.size.y as f32 * 0.95,
+                                        ),
                                     );
-                                    height = nheight;
-                                }
-                                // draw arrows
-                                // arrow 1: selected/source
-                                current.1 = 0.6 * current.1 + 0.4 * current.0 as f32;
-                                let arrow_y =
-                                    area.top_left().y + pixels_per_block * (current.1 - *scroll);
-                                let arrow_area = Rectangle::new(
-                                    Vec2::new(block_list_right, arrow_y),
-                                    Vec2::new(
-                                        block_list_right + pixels_per_block,
-                                        arrow_y + pixels_per_block,
-                                    ),
-                                );
-                                if area.top_left().y <= arrow_area.bottom_right().y
-                                    && area.bottom_right().y >= arrow_area.top_left().y
-                                {
-                                    if target.is_none() {
-                                        &mut self.images.world_menu_arrow_selected
-                                    } else {
-                                        &mut self.images.world_menu_arrow_source
+                                    graphics.draw_rectangle(
+                                        area.clone(),
+                                        Color::from_rgba(0.2, 0.2, 0.2, 0.8),
+                                    );
+                                    graphics.set_clip(Some(Rectangle::new(
+                                        IVec2::new(
+                                            area.top_left().x.ceil() as _,
+                                            area.top_left().y.ceil() as _,
+                                        ),
+                                        IVec2::new(
+                                            area.bottom_right().x.floor() as _,
+                                            area.bottom_right().y.floor() as _,
+                                        ),
+                                    )));
+                                    // get blocks info
+                                    let (chunk, inchunk) = runner.world.layers[state.layer]
+                                        .get_where(block.0, block.1);
+                                    let chunk = runner.world.layers[state.layer].get_mut(&chunk);
+                                    let blocks = &mut chunk[inchunk as usize];
+                                    dbg!(&blocks);
+                                    // draw blocks
+                                    if scroll_l.is_sign_negative() {
+                                        *scroll_l = 0.0;
                                     }
-                                    .draw_image_aspect_ratio_tinted(
-                                        graphics,
-                                        helper,
-                                        arrow_area,
-                                        Color::WHITE,
-                                        false,
-                                    );
-                                }
-                                // arrow 2: target
-                                graphics.set_clip(None);
-                                if let Some((target_block, is_move, target_arr_height)) = target {
-                                    *target_arr_height = 0.6 * *target_arr_height
-                                        + 0.4
-                                            * if *is_move {
-                                                *target_block as f32 - 0.5
-                                            } else {
-                                                *target_block as f32
-                                            };
+                                    let pixels_per_block = area.height() / 9.0;
+                                    let mut height =
+                                        area.top_left().y - pixels_per_block * (*scroll_l % 1.0);
+                                    let block_list_left = area.top_left().x;
+                                    let block_list_right = block_list_left + pixels_per_block;
+                                    for block in
+                                        blocks.iter().rev().skip(scroll_l.floor() as _).take(10)
+                                    {
+                                        let nheight = height + pixels_per_block;
+                                        self.draw_block(
+                                            graphics,
+                                            Rectangle::new(
+                                                Vec2::new(block_list_left, height),
+                                                Vec2::new(block_list_right, nheight),
+                                            ),
+                                            block,
+                                        );
+                                        height = nheight;
+                                    }
+                                    // draw arrows
+                                    // arrow 1: selected/source
+                                    current.1 = 0.6 * current.1 + 0.4 * current.0 as f32;
                                     let arrow_y = area.top_left().y
-                                        + pixels_per_block * (*target_arr_height - *scroll);
+                                        + pixels_per_block * (current.1 - *scroll_l);
                                     let arrow_area = Rectangle::new(
                                         Vec2::new(block_list_right, arrow_y),
                                         Vec2::new(
@@ -664,69 +665,141 @@ impl WindowHandler<Event> for Window {
                                     if area.top_left().y <= arrow_area.bottom_right().y
                                         && area.bottom_right().y >= arrow_area.top_left().y
                                     {
-                                        self.images
-                                            .world_menu_arrow_target
-                                            .draw_image_aspect_ratio_tinted(
-                                                graphics,
-                                                helper,
-                                                arrow_area,
-                                                Color::WHITE,
-                                                false,
-                                            );
+                                        if target.is_none() {
+                                            &mut self.images.world_menu_arrow_selected
+                                        } else {
+                                            &mut self.images.world_menu_arrow_source
+                                        }
+                                        .draw_image_aspect_ratio_tinted(
+                                            graphics,
+                                            helper,
+                                            arrow_area,
+                                            Color::WHITE,
+                                            false,
+                                        );
+                                    }
+                                    // arrow 2: target
+                                    graphics.set_clip(None);
+                                    if let Some((target_block, is_move, target_arr_height)) = target
+                                    {
+                                        *target_arr_height = 0.6 * *target_arr_height
+                                            + 0.4
+                                                * if *is_move {
+                                                    *target_block as f32 - 0.5
+                                                } else {
+                                                    *target_block as f32
+                                                };
+                                        let arrow_y = area.top_left().y
+                                            + pixels_per_block * (*target_arr_height - *scroll_l);
+                                        let arrow_area = Rectangle::new(
+                                            Vec2::new(block_list_right, arrow_y),
+                                            Vec2::new(
+                                                block_list_right + pixels_per_block,
+                                                arrow_y + pixels_per_block,
+                                            ),
+                                        );
+                                        if area.top_left().y <= arrow_area.bottom_right().y
+                                            && area.bottom_right().y >= arrow_area.top_left().y
+                                        {
+                                            self.images
+                                                .world_menu_arrow_target
+                                                .draw_image_aspect_ratio_tinted(
+                                                    graphics,
+                                                    helper,
+                                                    arrow_area,
+                                                    Color::WHITE,
+                                                    false,
+                                                );
+                                        }
+                                    }
+                                    // buttons
+                                    let button_area = |nr: f32| {
+                                        Rectangle::new(
+                                            Vec2::new(
+                                                area.bottom_right().x - pixels_per_block,
+                                                area.top_left().y + pixels_per_block * nr,
+                                            ),
+                                            Vec2::new(
+                                                area.bottom_right().x,
+                                                area.top_left().y + pixels_per_block * (nr + 1.0),
+                                            ),
+                                        )
+                                    };
+                                    // button 1: pause/unpause
+                                    let ba = button_area(0.0);
+                                    let mi = ba.contains(self.mouse_pos);
+                                    if state.run {
+                                        &mut self.images.world_menu_button_pause
+                                    } else {
+                                        &mut self.images.world_menu_button_paused
+                                    }
+                                    .draw_image_aspect_ratio_tinted(
+                                        graphics,
+                                        helper,
+                                        ba,
+                                        if mi { Color::WHITE } else { Color::LIGHT_GRAY },
+                                        false,
+                                    );
+                                    // button 2: tick
+                                    let ba = button_area(1.0);
+                                    let mi = ba.contains(self.mouse_pos);
+                                    self.images
+                                        .world_menu_button_tick
+                                        .draw_image_aspect_ratio_tinted(
+                                            graphics,
+                                            helper,
+                                            ba,
+                                            if mi { Color::WHITE } else { Color::LIGHT_GRAY },
+                                            false,
+                                        );
+                                    // button 3: send signal `0`
+                                    let ba = button_area(2.0);
+                                    let mi = ba.contains(self.mouse_pos);
+                                    self.images
+                                        .world_menu_button_signalzero
+                                        .draw_image_aspect_ratio_tinted(
+                                            graphics,
+                                            helper,
+                                            ba,
+                                            if mi { Color::WHITE } else { Color::LIGHT_GRAY },
+                                            false,
+                                        );
+                                }
+                                // right
+                                {
+                                    let area = Rectangle::new(
+                                        Vec2::new(
+                                            self.size.x as f32 - self.size.y as f32 * right,
+                                            self.size.y as f32 * 0.05,
+                                        ),
+                                        Vec2::new(
+                                            self.size.x as f32 - self.size.y as f32 * left,
+                                            self.size.y as f32 * 0.95,
+                                        ),
+                                    );
+                                    graphics.draw_rectangle(
+                                        area.clone(),
+                                        Color::from_rgba(0.2, 0.2, 0.2, 0.8),
+                                    );
+                                    let pixels_per_block = area.height() / 9.0 / 2.0;
+                                    for (i, block) in state.blocks_for_menu.iter().enumerate() {
+                                        let x =
+                                            area.top_left().x + pixels_per_block * (i % 6) as f32;
+                                        let y =
+                                            area.top_left().y + pixels_per_block * (i / 6) as f32;
+                                        self.draw_block(
+                                            graphics,
+                                            Rectangle::new(
+                                                Vec2::new(x, y),
+                                                Vec2::new(
+                                                    x + pixels_per_block,
+                                                    y + pixels_per_block,
+                                                ),
+                                            ),
+                                            block,
+                                        );
                                     }
                                 }
-                                // buttons
-                                let button_area = |nr: f32| {
-                                    Rectangle::new(
-                                        Vec2::new(
-                                            area.bottom_right().x - pixels_per_block,
-                                            area.top_left().y + pixels_per_block * nr,
-                                        ),
-                                        Vec2::new(
-                                            area.bottom_right().x,
-                                            area.top_left().y + pixels_per_block * (nr + 1.0),
-                                        ),
-                                    )
-                                };
-                                // button 1: pause/unpause
-                                let ba = button_area(0.0);
-                                let mi = ba.contains(self.mouse_pos);
-                                if state.run {
-                                    &mut self.images.world_menu_button_pause
-                                } else {
-                                    &mut self.images.world_menu_button_paused
-                                }
-                                .draw_image_aspect_ratio_tinted(
-                                    graphics,
-                                    helper,
-                                    ba,
-                                    if mi { Color::WHITE } else { Color::LIGHT_GRAY },
-                                    false,
-                                );
-                                // button 2: tick
-                                let ba = button_area(1.0);
-                                let mi = ba.contains(self.mouse_pos);
-                                self.images
-                                    .world_menu_button_tick
-                                    .draw_image_aspect_ratio_tinted(
-                                        graphics,
-                                        helper,
-                                        ba,
-                                        if mi { Color::WHITE } else { Color::LIGHT_GRAY },
-                                        false,
-                                    );
-                                // button 3: send signal `0`
-                                let ba = button_area(2.0);
-                                let mi = ba.contains(self.mouse_pos);
-                                self.images
-                                    .world_menu_button_signalzero
-                                    .draw_image_aspect_ratio_tinted(
-                                        graphics,
-                                        helper,
-                                        ba,
-                                        if mi { Color::WHITE } else { Color::LIGHT_GRAY },
-                                        false,
-                                    );
                             }
                         }
                     }
@@ -753,7 +826,7 @@ impl WindowHandler<Event> for Window {
                     WSInGameMenu::BlockStackChanger {
                         changing,
                         block,
-                        scroll,
+                        scroll_l: scroll,
                         current,
                         target,
                     },
@@ -813,6 +886,9 @@ impl WindowHandler<Event> for Window {
                                 }
                                 for (i, dir) in dirs.iter().enumerate() {
                                     chunk[16 * 0 + 4 + i].push(Block::Delay(0, *dir));
+                                }
+                                for (i, dir) in dirs.iter().enumerate() {
+                                    chunk[16 * 0 + 10 + i].push(Block::Splitter(*dir));
                                 }
                                 for mode in 0..=9u8 {
                                     for (i, dir) in dirs.iter().enumerate() {
@@ -900,7 +976,7 @@ impl WindowHandler<Event> for Window {
                         WSInGameMenu::BlockStackChanger {
                             changing,
                             block,
-                            scroll,
+                            scroll_l: scroll,
                             current,
                             target,
                         },
@@ -951,6 +1027,27 @@ impl WindowHandler<Event> for Window {
                                 }
                                 _ => {}
                             }
+                        } else if self.mouse_pos.y >= self.size.y as f32 * 0.05
+                            && self.mouse_pos.y <= self.size.y as f32 * 0.95
+                            && self.mouse_pos.x >= self.size.x as f32 - self.size.y as f32 * 0.3
+                            && self.mouse_pos.x <= self.size.x as f32
+                        {
+                            let i = 6
+                                * (((self.mouse_pos.y / self.size.y as f32) - 0.05) * 20.0)
+                                    as usize
+                                + (((self.mouse_pos.x - self.size.x as f32
+                                    + self.size.y as f32 * 0.3)
+                                    * 6.0
+                                    / (self.size.y as f32 * 0.3))
+                                    as usize)
+                                    .max(0)
+                                    .min(5);
+                            if let Some(add_block) = state.blocks_for_menu.get(i) {
+                                let (chunk, pos) =
+                                    runner.world.layers[state.layer].get_where(block.0, block.1);
+                                runner.world.layers[state.layer].get_mut(&chunk)[pos as usize]
+                                    .push(add_block.clone());
+                            }
                         }
                     }
                 },
@@ -975,7 +1072,7 @@ impl WindowHandler<Event> for Window {
                             WSInGameMenu::BlockStackChanger {
                                 changing,
                                 block: _,
-                                scroll: _,
+                                scroll_l: _,
                                 current: _,
                                 target: _,
                             },
@@ -989,8 +1086,8 @@ impl WindowHandler<Event> for Window {
                                 self.mouse_pos,
                                 WSInGameMenu::BlockStackChanger {
                                     changing: Some((false, Instant::now())),
-                                    block: (block_pos.x.round() as _, block_pos.y.round() as _),
-                                    scroll: 0.0,
+                                    block: (block_pos.x.floor() as _, block_pos.y.floor() as _),
+                                    scroll_l: 0.0,
                                     current: (0, -0.0),
                                     target: None,
                                 },
@@ -1025,7 +1122,7 @@ impl WindowHandler<Event> for Window {
                     WSInGameMenu::BlockStackChanger {
                         changing,
                         block,
-                        scroll,
+                        scroll_l: scroll,
                         current,
                         target,
                     },
@@ -1081,7 +1178,7 @@ impl WindowHandler<Event> for Window {
                         WSInGameMenu::BlockStackChanger {
                             changing,
                             block,
-                            scroll,
+                            scroll_l: scroll,
                             current,
                             target,
                         },
@@ -1147,6 +1244,7 @@ struct WSInGame {
     /// updated on each draw
     pixels_per_block: f32,
     open_menu: Option<(Vec2, WSInGameMenu)>,
+    blocks_for_menu: Vec<Block>,
 }
 impl Default for WSInGame {
     fn default() -> Self {
@@ -1157,6 +1255,116 @@ impl Default for WSInGame {
             zoom: 5.0,
             pixels_per_block: 1.0,
             open_menu: None,
+            blocks_for_menu: vec![
+                Block::Delay(0, runner::DIR_LEFT),
+                Block::Delay(0, runner::DIR_UP),
+                Block::Delay(0, runner::DIR_DOWN),
+                Block::Delay(0, runner::DIR_RIGHT),
+                Block::Delay(0, runner::DIR_UP_L),
+                Block::Delay(0, runner::DIR_DOWN_L),
+                Block::Splitter(runner::DIR_LEFT),
+                Block::Splitter(runner::DIR_UP),
+                Block::Splitter(runner::DIR_DOWN),
+                Block::Splitter(runner::DIR_RIGHT),
+                Block::Splitter(runner::DIR_UP_L),
+                Block::Splitter(runner::DIR_DOWN_L),
+                Block::Color(0xFFFF0000),
+                Block::Color(0xFF00FF00),
+                Block::Color(0xFF0000FF),
+                Block::Color(0xFF000000),
+                Block::Color(0xFFFFFFFF),
+                Block::Color(0x00000000),
+                Block::Char(b'a' as _),
+                Block::Char(b'z' as _),
+                Block::Char(b'A' as _),
+                Block::Char(b'Z' as _),
+                Block::Char('\u{1F980}' as _),
+                Block::Char(0),
+                Block::Storage(0, 0, runner::DIR_LEFT),
+                Block::Storage(0, 0, runner::DIR_UP),
+                Block::Storage(0, 0, runner::DIR_DOWN),
+                Block::Storage(0, 0, runner::DIR_RIGHT),
+                Block::Storage(0, 0, runner::DIR_UP_L),
+                Block::Storage(0, 0, runner::DIR_DOWN_L),
+                Block::Storage(0, 1, runner::DIR_LEFT),
+                Block::Storage(0, 1, runner::DIR_UP),
+                Block::Storage(0, 1, runner::DIR_DOWN),
+                Block::Storage(0, 1, runner::DIR_RIGHT),
+                Block::Storage(0, 1, runner::DIR_UP_L),
+                Block::Storage(0, 1, runner::DIR_DOWN_L),
+                Block::Storage(0, 2, runner::DIR_LEFT),
+                Block::Storage(0, 2, runner::DIR_UP),
+                Block::Storage(0, 2, runner::DIR_DOWN),
+                Block::Storage(0, 2, runner::DIR_RIGHT),
+                Block::Storage(0, 2, runner::DIR_UP_L),
+                Block::Storage(0, 2, runner::DIR_DOWN_L),
+                Block::Storage(0, 3, runner::DIR_LEFT),
+                Block::Storage(0, 3, runner::DIR_UP),
+                Block::Storage(0, 3, runner::DIR_DOWN),
+                Block::Storage(0, 3, runner::DIR_RIGHT),
+                Block::Storage(0, 3, runner::DIR_UP_L),
+                Block::Storage(0, 3, runner::DIR_DOWN_L),
+                Block::Storage(0, 4, runner::DIR_LEFT),
+                Block::Storage(0, 4, runner::DIR_UP),
+                Block::Storage(0, 4, runner::DIR_DOWN),
+                Block::Storage(0, 4, runner::DIR_RIGHT),
+                Block::Storage(0, 4, runner::DIR_UP_L),
+                Block::Storage(0, 4, runner::DIR_DOWN_L),
+                Block::Storage(0, 5, runner::DIR_LEFT),
+                Block::Storage(0, 5, runner::DIR_UP),
+                Block::Storage(0, 5, runner::DIR_DOWN),
+                Block::Storage(0, 5, runner::DIR_RIGHT),
+                Block::Storage(0, 5, runner::DIR_UP_L),
+                Block::Storage(0, 5, runner::DIR_DOWN_L),
+                Block::Storage(0, 6, runner::DIR_LEFT),
+                Block::Storage(0, 6, runner::DIR_UP),
+                Block::Storage(0, 6, runner::DIR_DOWN),
+                Block::Storage(0, 6, runner::DIR_RIGHT),
+                Block::Storage(0, 6, runner::DIR_UP_L),
+                Block::Storage(0, 6, runner::DIR_DOWN_L),
+                Block::Storage(0, 7, runner::DIR_LEFT),
+                Block::Storage(0, 7, runner::DIR_UP),
+                Block::Storage(0, 7, runner::DIR_DOWN),
+                Block::Storage(0, 7, runner::DIR_RIGHT),
+                Block::Storage(0, 7, runner::DIR_UP_L),
+                Block::Storage(0, 7, runner::DIR_DOWN_L),
+                Block::Storage(0, 8, runner::DIR_LEFT),
+                Block::Storage(0, 8, runner::DIR_UP),
+                Block::Storage(0, 8, runner::DIR_DOWN),
+                Block::Storage(0, 8, runner::DIR_RIGHT),
+                Block::Storage(0, 8, runner::DIR_UP_L),
+                Block::Storage(0, 8, runner::DIR_DOWN_L),
+                Block::Storage(0, 9, runner::DIR_LEFT),
+                Block::Storage(0, 9, runner::DIR_UP),
+                Block::Storage(0, 9, runner::DIR_DOWN),
+                Block::Storage(0, 9, runner::DIR_RIGHT),
+                Block::Storage(0, 9, runner::DIR_UP_L),
+                Block::Storage(0, 9, runner::DIR_DOWN_L),
+                Block::Gate(false, runner::DIR_LEFT),
+                Block::Gate(false, runner::DIR_UP),
+                Block::Gate(false, runner::DIR_DOWN),
+                Block::Gate(false, runner::DIR_RIGHT),
+                Block::Gate(false, runner::DIR_UP_L),
+                Block::Gate(false, runner::DIR_DOWN_L),
+                Block::Gate(true, runner::DIR_LEFT),
+                Block::Gate(true, runner::DIR_UP),
+                Block::Gate(true, runner::DIR_DOWN),
+                Block::Gate(true, runner::DIR_RIGHT),
+                Block::Gate(true, runner::DIR_UP_L),
+                Block::Gate(true, runner::DIR_DOWN_L),
+                Block::Move(runner::DIR_LEFT),
+                Block::Move(runner::DIR_UP),
+                Block::Move(runner::DIR_DOWN),
+                Block::Move(runner::DIR_RIGHT),
+                Block::Move(runner::DIR_UP_L),
+                Block::Move(runner::DIR_DOWN_L),
+                Block::Swap(runner::DIR_LEFT),
+                Block::Swap(runner::DIR_UP),
+                Block::Swap(runner::DIR_DOWN),
+                Block::Swap(runner::DIR_RIGHT),
+                Block::Swap(runner::DIR_UP_L),
+                Block::Swap(runner::DIR_DOWN_L),
+            ],
         }
     }
 }
@@ -1165,7 +1373,7 @@ enum WSInGameMenu {
         /// false => opening, true => closing
         changing: Option<(bool, Instant)>,
         block: (i64, i64),
-        scroll: f32,
+        scroll_l: f32,
         /// if target.is_none(), this is which block we are editing.
         /// if target.is_some(), this is the origin of the move/swap operation.
         current: (usize, f32),
