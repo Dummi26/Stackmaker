@@ -2,10 +2,12 @@ use std::{
     collections::{HashMap, VecDeque},
     fs,
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 pub struct World {
+    pub save_dir: Option<PathBuf>,
     pub layers: [Layer; 32],
     /// (signal, (dir (3b) + layer (5b)), target_chunk, target_pos)
     pub signals_queue: VecDeque<Vec<(u32, u8, u64, u8)>>,
@@ -60,6 +62,7 @@ pub enum Block {
 impl World {
     pub fn new_empty() -> Self {
         Self {
+            save_dir: None,
             layers: Default::default(),
             signals_queue: VecDeque::new(),
         }
@@ -109,7 +112,6 @@ impl Layer {
 impl Block {}
 
 fn create_empty_chunk<T>() -> [Vec<T>; 256] {
-    eprintln!("Creating empty chunk...");
     unsafe {
         #[allow(invalid_value)]
         let mut arr: [Vec<T>; 256] = std::mem::MaybeUninit::uninit().assume_init();
@@ -131,7 +133,16 @@ impl Default for Layer {
 // SAVING
 
 impl World {
-    pub fn load_from_dir<P: AsRef<Path>>(dir: P) -> Result<Option<Self>, std::io::Error> {
+    pub fn load_from_dir<P: AsRef<Path>>(
+        dir: P,
+        prog: Option<Arc<Mutex<f32>>>,
+    ) -> Result<Option<Self>, std::io::Error> {
+        fn p(prog: &Option<Arc<Mutex<f32>>>, v: f32) {
+            if let Some(prog) = prog {
+                *prog.lock().unwrap() = v;
+            }
+        }
+        p(&prog, 1.0);
         let signals_queue = {
             let mut buf = Vec::new();
             fs::File::open(dir.as_ref().join("signals"))?.read_to_end(&mut buf)?;
@@ -141,9 +152,11 @@ impl World {
                 return Ok(None);
             }
         };
+        p(&prog, 0.5);
         let layers = {
             let mut layers: [Layer; 32] = Default::default();
             for (i, layer) in layers.iter_mut().enumerate() {
+                p(&prog, 0.5 + i as f32 / 32.0);
                 let mut buf = Vec::new();
                 fs::File::open(dir.as_ref().join(format!("layer_{i}")))?.read_to_end(&mut buf)?;
                 *layer = if let Some(v) = SaveLoad::load(&mut buf.into_iter()) {
@@ -154,7 +167,9 @@ impl World {
             }
             layers
         };
+        p(&prog, 1.0);
         Ok(Some(Self {
+            save_dir: Some(dir.as_ref().to_path_buf()),
             layers,
             signals_queue,
         }))

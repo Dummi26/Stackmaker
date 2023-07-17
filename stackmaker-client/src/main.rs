@@ -52,18 +52,7 @@ impl Window {
             mouse_down_m: false,
             mouse_down_r: false,
             redraw: true,
-            state: WindowState::MainMenu(WSMainMenu {
-                singleplayer_world_box: Rectangle::new(Vec2::new(0.1, 0.4), Vec2::new(0.3, 0.9)),
-                singleplayer_new_world_button: Rectangle::new(
-                    Vec2::new(0.7, 0.4),
-                    Vec2::new(0.9, 0.5),
-                ),
-                singleplayer_new_world_button_brightness: 0.0,
-                title_text: None,
-                desired_world_height: 0.0,
-                worlds_texts: vec![],
-                world_scroll: 0,
-            }),
+            state: WindowState::MainMenu(WSMainMenu::new()),
             saves: vec![],
             images: Default::default(),
         }
@@ -159,7 +148,7 @@ pub enum Event {
 enum WindowState {
     Nothing,
     MainMenu(WSMainMenu),
-    LoadingWorld(Arc<Mutex<f32>>, Option<JoinHandle<Runner>>),
+    LoadingWorld(Arc<Mutex<f32>>, Option<JoinHandle<Option<Runner>>>),
     Singleplayer(WSInGame, Runner),
 }
 impl WindowState {
@@ -375,7 +364,7 @@ impl WindowHandler<Event> for Window {
                 // draw saves list
                 if redraw || state.worlds_texts.len() != self.saves.len() {
                     if let Some(font) = &self.font_main {
-                        let scale = {
+                        {
                             let layout = font.layout_text(
                                 "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
                                 1.0,
@@ -383,12 +372,16 @@ impl WindowHandler<Event> for Window {
                             );
                             state.desired_world_height =
                                 48.0 * (self.size.y as f32 / 1080.0).sqrt();
-                            state.desired_world_height / layout.height()
-                        };
+                            state.world_display_font_scale =
+                                state.desired_world_height / layout.height();
+                        }
                         state.worlds_texts = vec![None; self.saves.len()];
                         for (i, save) in self.saves.iter().enumerate() {
-                            state.worlds_texts[i] =
-                                Some(font.layout_text(&save.1, scale, TextOptions::default()));
+                            state.worlds_texts[i] = Some(font.layout_text(
+                                &save.1,
+                                state.world_display_font_scale,
+                                TextOptions::default(),
+                            ));
                         }
                     }
                 }
@@ -408,7 +401,12 @@ impl WindowHandler<Event> for Window {
                     area.bottom_right().into_i32(),
                 )));
                 let mut height = self.size.y as f32 * 0.4;
-                for text in state.worlds_texts.iter().skip(state.world_scroll) {
+                for (i, text) in state
+                    .worlds_texts
+                    .iter_mut()
+                    .enumerate()
+                    .skip(state.world_scroll)
+                {
                     let new_height = height + state.desired_world_height;
                     if let Some(text) = text {
                         graphics.draw_text(
@@ -423,6 +421,14 @@ impl WindowHandler<Event> for Window {
                             },
                             text,
                         );
+                    } else {
+                        if let Some(font) = &self.font_main {
+                            *text = Some(font.layout_text(
+                                &self.saves[i].1,
+                                state.world_display_font_scale,
+                                TextOptions::default(),
+                            ));
+                        }
                     }
                     height = new_height;
                     if height >= area.bottom_right().y {
@@ -467,11 +473,13 @@ impl WindowHandler<Event> for Window {
                 //
             }
             WindowState::LoadingWorld(prog, handle) => {
+                helper.request_redraw();
                 if handle.as_ref().unwrap().is_finished() {
-                    self.state = WindowState::Singleplayer(
-                        WSInGame::default(),
-                        handle.take().unwrap().join().unwrap(),
-                    );
+                    if let Some(runner) = handle.take().unwrap().join().unwrap() {
+                        self.state = WindowState::Singleplayer(WSInGame::default(), runner);
+                    } else {
+                        self.state = WindowState::MainMenu(WSMainMenu::new())
+                    }
                     self.redraw = true;
                 } else {
                     if redraw {
@@ -491,7 +499,7 @@ impl WindowHandler<Event> for Window {
                     );
                     graphics.draw_rectangle(
                         Rectangle::new(Vec2::new(mid, top), Vec2::new(right, bottom)),
-                        Color::from_int_rgb(50, 0, 20),
+                        Color::from_int_rgb(40, 0, 20),
                     );
                 }
             }
@@ -626,7 +634,6 @@ impl WindowHandler<Event> for Window {
                                         .get_where(block.0, block.1);
                                     let chunk = runner.world.layers[state.layer].get_mut(&chunk);
                                     let blocks = &mut chunk[inchunk as usize];
-                                    dbg!(&blocks);
                                     // draw blocks
                                     if scroll_l.is_sign_negative() {
                                         *scroll_l = 0.0;
@@ -863,108 +870,130 @@ impl WindowHandler<Event> for Window {
                         let index = state.world_scroll + height.floor() as usize;
                         if let Some(save) = self.saves.get(index) {
                             eprintln!("Loading save {save:?}");
+                            let prog = Arc::new(Mutex::new(0.0));
+                            let path = save.0.clone();
+                            self.state = WindowState::LoadingWorld(
+                                Arc::clone(&prog),
+                                Some(std::thread::spawn(move || {
+                                    match World::load_from_dir(path, Some(prog)) {
+                                        Ok(Some(world)) => {
+                                            let mut runner = Runner::new(world);
+                                            runner.autosave = (100, 1000);
+                                            Some(runner)
+                                        }
+                                        Ok(None) => {
+                                            eprintln!("[err] couldn't load world!");
+                                            None
+                                        }
+                                        Err(e) => {
+                                            eprintln!("[err] couldn't load world: {e}");
+                                            None
+                                        }
+                                    }
+                                })),
+                            );
+                            self.redraw = true;
                         }
                     } else {
                         let singleplayer_new_world_button =
                             Self::rel_to_abs_rect(self.size, &state.singleplayer_new_world_button);
                         if singleplayer_new_world_button.contains(self.mouse_pos) {
                             eprintln!("Setting up empty world...");
-                            let mut world = World::new_empty();
-                            eprintln!("Adding some blocks for testing...");
-                            {
-                                let chunk = world.layers[0].get_mut(&0);
-                                let dirs = [
-                                    runner::DIR_UP,
-                                    runner::DIR_RIGHT,
-                                    runner::DIR_DOWN,
-                                    runner::DIR_LEFT,
-                                    runner::DIR_UP_L,
-                                    runner::DIR_DOWN_L,
-                                ];
-                                for ch in (b'A'..=b'Z').rev() {
-                                    chunk[0].push(Block::Char(ch as _));
-                                }
-                                for (i, dir) in dirs.iter().enumerate() {
-                                    chunk[16 * 0 + 4 + i].push(Block::Delay(0, *dir));
-                                }
-                                for (i, dir) in dirs.iter().enumerate() {
-                                    chunk[16 * 0 + 10 + i].push(Block::Splitter(*dir));
-                                }
-                                for mode in 0..=9u8 {
-                                    for (i, dir) in dirs.iter().enumerate() {
-                                        chunk[16 * (1 + mode as usize) + 4 + i]
-                                            .push(Block::Storage(0, mode, *dir));
-                                    }
-                                }
-                                for (i, dir) in dirs.iter().enumerate() {
-                                    chunk[16 * 14 + 4 + i].push(Block::Gate(false, *dir));
-                                }
-                                for (i, dir) in dirs.iter().enumerate() {
-                                    chunk[16 * 14 + 10 + i].push(Block::Gate(true, *dir));
-                                }
-                                for (i, dir) in dirs.iter().enumerate() {
-                                    chunk[16 * 15 + 4 + i].push(Block::Move(*dir));
-                                }
-                                for (i, dir) in dirs.iter().enumerate() {
-                                    chunk[16 * 15 + 10 + i].push(Block::Swap(*dir));
-                                }
-                            }
-                            // TOP LEFT
-                            {
-                                let (chunk, pos) = world.layers[0].get_where(-1, -1);
-                                let chunk = world.layers[0].get_mut(&chunk);
-                                for (i, blocks) in chunk.iter_mut().enumerate() {
-                                    let (x, y) =
-                                        (15 - (i as u32 & 0xF), 15 - ((i as u32 & 0xF0) >> 4));
-                                    blocks.push(Block::Color(
-                                        0xFF000000 | x << 16 | x << 20 | y << 0 | y << 4,
-                                    ));
-                                }
-                            }
-                            // TOP RIGHT
-                            {
-                                let (chunk, pos) = world.layers[0].get_where(0, -1);
-                                let chunk = world.layers[0].get_mut(&chunk);
-                                for (i, blocks) in chunk.iter_mut().enumerate() {
-                                    let (x, y) = (i as u32 & 0xF, 15 - ((i as u32 & 0xF0) >> 4));
-                                    blocks.push(Block::Color(
-                                        0xFF000000 | x << 8 | x << 12 | y << 0 | y << 4,
-                                    ));
-                                }
-                            }
-                            // BOTTOM LEFT
-                            {
-                                let (chunk, pos) = world.layers[0].get_where(-1, 0);
-                                let chunk = world.layers[0].get_mut(&chunk);
-                                for (i, blocks) in chunk.iter_mut().enumerate() {
-                                    let (x, y) = (15 - (i as u32 & 0xF), (i as u32 & 0xF0) >> 4);
-                                    blocks.push(Block::Color(
-                                        0xFF000000 | x << 16 | x << 20 | y << 8 | y << 12,
-                                    ));
-                                }
-                            }
-                            // BOTTOM 2 RIGHT
-                            {
-                                let (chunk, _) = world.layers[0].get_where(16, 0);
-                                let chunk = world.layers[0].get_mut(&chunk);
-                                chunk[1].push(Block::Color(0xFFFFFFFF));
-                                chunk[16 + 1].push(Block::Splitter(runner::DIR_UP));
-                                chunk[32 + 1].push(Block::Delay(0, runner::DIR_DOWN));
-                                chunk[48 + 1].push(Block::Splitter(runner::DIR_RIGHT));
-                                chunk[16 + 2].push(Block::Storage(0xFF000000, 4, runner::DIR_LEFT));
-                                chunk[32 + 2].push(Block::Storage(16, 0, runner::DIR_UP));
-                                chunk[48 + 2].push(Block::Splitter(runner::DIR_UP));
-                                chunk[64 + 2].push(Block::Splitter(runner::DIR_RIGHT));
-                                chunk[16 + 3].push(Block::Splitter(runner::DIR_LEFT));
-                                chunk[32 + 3].push(Block::Storage(4, 0, runner::DIR_UP));
-                                chunk[48 + 3].push(Block::Delay(0, runner::DIR_UP));
-                                chunk[64 + 3].push(Block::Splitter(runner::DIR_UP));
-                            }
-                            eprintln!("Setting new WindowState.");
-                            self.state =
-                                WindowState::Singleplayer(WSInGame::default(), Runner::new(world));
+                            let world = World::new_empty();
+                            // eprintln!("Adding some blocks for testing...");
+                            // {
+                            //     let chunk = world.layers[0].get_mut(&0);
+                            //     let dirs = [
+                            //         runner::DIR_UP,
+                            //         runner::DIR_RIGHT,
+                            //         runner::DIR_DOWN,
+                            //         runner::DIR_LEFT,
+                            //         runner::DIR_UP_L,
+                            //         runner::DIR_DOWN_L,
+                            //     ];
+                            //     for ch in (b'A'..=b'Z').rev() {
+                            //         chunk[0].push(Block::Char(ch as _));
+                            //     }
+                            //     for (i, dir) in dirs.iter().enumerate() {
+                            //         chunk[16 * 0 + 4 + i].push(Block::Delay(0, *dir));
+                            //     }
+                            //     for (i, dir) in dirs.iter().enumerate() {
+                            //         chunk[16 * 0 + 10 + i].push(Block::Splitter(*dir));
+                            //     }
+                            //     for mode in 0..=9u8 {
+                            //         for (i, dir) in dirs.iter().enumerate() {
+                            //             chunk[16 * (1 + mode as usize) + 4 + i]
+                            //                 .push(Block::Storage(0, mode, *dir));
+                            //         }
+                            //     }
+                            //     for (i, dir) in dirs.iter().enumerate() {
+                            //         chunk[16 * 14 + 4 + i].push(Block::Gate(false, *dir));
+                            //     }
+                            //     for (i, dir) in dirs.iter().enumerate() {
+                            //         chunk[16 * 14 + 10 + i].push(Block::Gate(true, *dir));
+                            //     }
+                            //     for (i, dir) in dirs.iter().enumerate() {
+                            //         chunk[16 * 15 + 4 + i].push(Block::Move(*dir));
+                            //     }
+                            //     for (i, dir) in dirs.iter().enumerate() {
+                            //         chunk[16 * 15 + 10 + i].push(Block::Swap(*dir));
+                            //     }
+                            // }
+                            // // TOP LEFT
+                            // {
+                            //     let (chunk, pos) = world.layers[0].get_where(-1, -1);
+                            //     let chunk = world.layers[0].get_mut(&chunk);
+                            //     for (i, blocks) in chunk.iter_mut().enumerate() {
+                            //         let (x, y) =
+                            //             (15 - (i as u32 & 0xF), 15 - ((i as u32 & 0xF0) >> 4));
+                            //         blocks.push(Block::Color(
+                            //             0xFF000000 | x << 16 | x << 20 | y << 0 | y << 4,
+                            //         ));
+                            //     }
+                            // }
+                            // // TOP RIGHT
+                            // {
+                            //     let (chunk, pos) = world.layers[0].get_where(0, -1);
+                            //     let chunk = world.layers[0].get_mut(&chunk);
+                            //     for (i, blocks) in chunk.iter_mut().enumerate() {
+                            //         let (x, y) = (i as u32 & 0xF, 15 - ((i as u32 & 0xF0) >> 4));
+                            //         blocks.push(Block::Color(
+                            //             0xFF000000 | x << 8 | x << 12 | y << 0 | y << 4,
+                            //         ));
+                            //     }
+                            // }
+                            // // BOTTOM LEFT
+                            // {
+                            //     let (chunk, pos) = world.layers[0].get_where(-1, 0);
+                            //     let chunk = world.layers[0].get_mut(&chunk);
+                            //     for (i, blocks) in chunk.iter_mut().enumerate() {
+                            //         let (x, y) = (15 - (i as u32 & 0xF), (i as u32 & 0xF0) >> 4);
+                            //         blocks.push(Block::Color(
+                            //             0xFF000000 | x << 16 | x << 20 | y << 8 | y << 12,
+                            //         ));
+                            //     }
+                            // }
+                            // // BOTTOM 2 RIGHT
+                            // {
+                            //     let (chunk, _) = world.layers[0].get_where(16, 0);
+                            //     let chunk = world.layers[0].get_mut(&chunk);
+                            //     chunk[1].push(Block::Color(0xFFFFFFFF));
+                            //     chunk[16 + 1].push(Block::Splitter(runner::DIR_UP));
+                            //     chunk[32 + 1].push(Block::Delay(0, runner::DIR_DOWN));
+                            //     chunk[48 + 1].push(Block::Splitter(runner::DIR_RIGHT));
+                            //     chunk[16 + 2].push(Block::Storage(0xFF000000, 4, runner::DIR_LEFT));
+                            //     chunk[32 + 2].push(Block::Storage(16, 0, runner::DIR_UP));
+                            //     chunk[48 + 2].push(Block::Splitter(runner::DIR_UP));
+                            //     chunk[64 + 2].push(Block::Splitter(runner::DIR_RIGHT));
+                            //     chunk[16 + 3].push(Block::Splitter(runner::DIR_LEFT));
+                            //     chunk[32 + 3].push(Block::Storage(4, 0, runner::DIR_UP));
+                            //     chunk[48 + 3].push(Block::Delay(0, runner::DIR_UP));
+                            //     chunk[64 + 3].push(Block::Splitter(runner::DIR_UP));
+                            // }
+                            let mut runner = Runner::new(world);
+                            runner.autosave = (500, 0);
+                            self.state = WindowState::Singleplayer(WSInGame::default(), runner);
                             self.redraw = true;
-                            eprintln!("Done.");
                         }
                     }
                 }
@@ -1233,8 +1262,23 @@ struct WSMainMenu {
     singleplayer_new_world_button_brightness: f32,
     title_text: Option<Rc<FormattedTextBlock>>,
     desired_world_height: f32,
+    world_display_font_scale: f32,
     world_scroll: usize,
     worlds_texts: Vec<Option<Rc<FormattedTextBlock>>>,
+}
+impl WSMainMenu {
+    fn new() -> Self {
+        Self {
+            singleplayer_world_box: Rectangle::new(Vec2::new(0.1, 0.4), Vec2::new(0.3, 0.9)),
+            singleplayer_new_world_button: Rectangle::new(Vec2::new(0.7, 0.4), Vec2::new(0.9, 0.5)),
+            singleplayer_new_world_button_brightness: 0.0,
+            title_text: None,
+            desired_world_height: 0.0,
+            world_display_font_scale: 0.0,
+            worlds_texts: vec![],
+            world_scroll: 0,
+        }
+    }
 }
 struct WSInGame {
     run: bool,

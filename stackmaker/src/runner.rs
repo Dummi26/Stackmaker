@@ -2,6 +2,11 @@ use crate::world::{Block, World};
 
 pub struct Runner {
     pub world: World,
+    /// 0 = don't autosave, otherwise save once for every n ticks.
+    /// first field saves to /tmp,
+    /// second field saves to the actual save on disk.
+    pub autosave: (u64, u64),
+    autosave_elapsed: (u64, u64),
 }
 
 pub enum Changes {}
@@ -12,9 +17,45 @@ impl Runner {
         if world.signals_queue.is_empty() {
             world.signals_queue.push_back(vec![]);
         }
-        Self { world }
+        Self {
+            world,
+            autosave: (0, 0),
+            autosave_elapsed: (0, 0),
+        }
     }
     pub fn tick(&mut self) {
+        if self.autosave.0 > 0 {
+            self.autosave_elapsed.0 += 1;
+            if self.autosave_elapsed.0 >= self.autosave.0 {
+                // autosave to /tmp
+                eprintln!("[info] autosaving to /tmp/stackmaker-temp-save");
+                match self.world.save_to_dir("/tmp/stackmaker-temp-save") {
+                    Ok(()) => {
+                        self.autosave_elapsed.0 = 0;
+                    }
+                    Err(e) => {
+                        eprintln!("[warn] Couldn't save world to /tmp/stackmaker-temp-save: {e}");
+                    }
+                }
+            }
+        }
+        if self.autosave.1 > 0 {
+            self.autosave_elapsed.1 += 1;
+            if self.autosave_elapsed.1 >= self.autosave.1 {
+                // autosave to file
+                if let Some(dir) = &self.world.save_dir {
+                    eprintln!("[info] saving to {dir:?}");
+                    match self.world.save_to_dir(dir) {
+                        Ok(()) => {
+                            self.autosave_elapsed.1 = 0;
+                        }
+                        Err(e) => {
+                            eprintln!("[warn] Couldn't save world to {dir:?}: {e}");
+                        }
+                    }
+                }
+            }
+        }
         if self.world.signals_queue.len() < 2 {
             self.world.signals_queue.push_back(vec![]);
         }
